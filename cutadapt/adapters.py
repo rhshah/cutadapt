@@ -5,7 +5,6 @@ Adapters
 from __future__ import print_function, division, absolute_import
 import sys
 import re
-from collections import defaultdict
 from cutadapt import align, colorspace
 from cutadapt.seqio import ColorspaceSequence, FastaReader
 
@@ -227,12 +226,6 @@ class Adapter(object):
 			self._front_flag = None  # means: guess
 		else:
 			self._front_flag = where not in (BACK, SUFFIX)
-		# statistics about length of removed sequences
-		self.lengths_front = defaultdict(int)
-		self.lengths_back = defaultdict(int)
-		self.errors_front = defaultdict(lambda: defaultdict(int))
-		self.errors_back = defaultdict(lambda: defaultdict(int))
-		self.adjacent_bases = { 'A': 0, 'C': 0, 'G': 0, 'T': 0, '': 0 }
 
 		self.aligner = align.Aligner(self.sequence, self.max_error_rate,
 			flags=self.where, wildcard_ref=self.adapter_wildcards, wildcard_query=self.read_wildcards)
@@ -319,20 +312,10 @@ class Adapter(object):
 
 	def _trimmed_front(self, match):
 		"""Return a trimmed read"""
-		# TODO move away
-		self.lengths_front[match.rstop] += 1
-		self.errors_front[match.rstop][match.errors] += 1
 		return match.read[match.rstop:]
 
 	def _trimmed_back(self, match):
 		"""Return a trimmed read without the 3' (back) adapter"""
-		# TODO move away
-		self.lengths_back[len(match.read) - match.rstart] += 1
-		self.errors_back[len(match.read) - match.rstart][match.errors] += 1
-		adjacent_base = match.read.sequence[match.rstart-1:match.rstart]
-		if adjacent_base not in 'ACGT':
-			adjacent_base = ''
-		self.adjacent_bases[adjacent_base] += 1
 		return match.read[:match.rstart]
 
 	def __len__(self):
@@ -385,8 +368,6 @@ class ColorspaceAdapter(Adapter):
 	def _trimmed_front(self, match):
 		"""Return a trimmed read"""
 		read = match.read
-		self.lengths_front[match.rstop] += 1
-		self.errors_front[match.rstop][match.errors] += 1
 		# to remove a front adapter, we need to re-encode the first color following the adapter match
 		color_after_adapter = read.sequence[match.rstop:match.rstop + 1]
 		if not color_after_adapter:
@@ -403,8 +384,6 @@ class ColorspaceAdapter(Adapter):
 		"""Return a trimmed read"""
 		# trim one more color if long enough
 		adjusted_rstart = max(match.rstart - 1, 0)
-		self.lengths_back[len(match.read) - adjusted_rstart] += 1
-		self.errors_back[len(match.read) - adjusted_rstart][match.errors] += 1
 		return match.read[:adjusted_rstart]
 
 	def __repr__(self):

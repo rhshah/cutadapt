@@ -7,6 +7,7 @@ need to be stored, and as a class with a __call__ method if there are parameters
 """
 from __future__ import print_function, division, absolute_import
 import re
+from collections import defaultdict
 from cutadapt.qualtrim import quality_trim_index
 from cutadapt.compat import maketrans
 
@@ -32,6 +33,13 @@ class AdapterCutter(object):
 		self.rest_writer = rest_writer
 		self.action = action
 		self.with_adapters = 0
+
+		# statistics about length of removed sequences
+		self.lengths_front = defaultdict(int)
+		self.lengths_back = defaultdict(int)
+		self.errors_front = defaultdict(lambda: defaultdict(int))
+		self.errors_back = defaultdict(lambda: defaultdict(int))
+		self.adjacent_bases = { 'A': 0, 'C': 0, 'G': 0, 'T': 0, '': 0 }
 
 	def _best_match(self, read):
 		"""
@@ -108,6 +116,7 @@ class AdapterCutter(object):
 		# try at most self.times times to remove an adapter
 		trimmed_read = read
 		for t in range(self.times):
+			previous_length = len(trimmed_read)
 			match = self._best_match(trimmed_read)
 			if match is None:
 				# nothing found
@@ -117,6 +126,19 @@ class AdapterCutter(object):
 			assert match.length - match.errors > 0
 			matches.append(match)
 			trimmed_read = match.adapter.trimmed(match)
+
+			length_difference = previous_length - len(trimmed_read)
+			if match.front:
+				self.lengths_front[length_difference] += 1
+				self.errors_front[length_difference][match.errors] += 1
+			else:
+				self.lengths_back[length_difference] += 1
+				self.errors_back[length_difference][match.errors] += 1
+				if not colorspace:
+					adjacent_base = match.read.sequence[match.rstart-1:match.rstart]
+					if adjacent_base not in 'ACGT':
+						adjacent_base = ''
+					self.adjacent_bases[adjacent_base] += 1
 
 		trimmed_read.match = matches[-1] if matches else None
 		self._write_info(trimmed_read, matches)

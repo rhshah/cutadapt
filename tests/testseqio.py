@@ -137,6 +137,12 @@ class TestFastqReader:
 			assert not sr._file.closed
 		assert tmp_sr._file is None
 
+	def test_gzip_file(self):
+		with open('tests/data/small.fastq.gz') as f:
+			with FastqReader(f) as fr:
+				assert len(list(fr)) == 3
+			assert not f.closed
+
 
 class TestFastaQualReader:
 	@raises(FormatError)

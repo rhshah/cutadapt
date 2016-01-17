@@ -110,7 +110,7 @@ class Worker(multiprocessing.Process):
 
 	def run(self):
 		while True:
-			read = self.queue.get()
+			read = seqio.Sequence(*self.queue.get())
 			if read is None:
 				break
 			for modifier in self.modifiers:
@@ -135,7 +135,7 @@ def process_single_reads(reader, modifiers, filters):
 	for read in reader:
 		n += 1
 		total_bp += len(read.sequence)
-		reads_queue.put(read)
+		reads_queue.put((read.name, read.sequence, read.qualities))
 	reads_queue.put(None)
 	worker.join()
 	return Statistics(n=n, total_bp1=total_bp, total_bp2=None)

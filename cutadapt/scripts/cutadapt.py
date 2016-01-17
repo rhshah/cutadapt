@@ -110,9 +110,10 @@ class Worker(multiprocessing.Process):
 
 	def run(self):
 		while True:
-			read = seqio.Sequence(*self.queue.get())
-			if read is None:
+			v = self.queue.get()
+			if v is None:
 				break
+			read = seqio.Sequence(*v)
 			for modifier in self.modifiers:
 				read = modifier(read)
 			for filter in self.filters:

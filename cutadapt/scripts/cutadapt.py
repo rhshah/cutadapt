@@ -104,22 +104,18 @@ class RestFileWriter(object):
 class Worker(multiprocessing.Process):
 	def __init__(self, queue, modifiers, filters):
 		super(Worker, self).__init__()
+		self.queue = queue
 		self.modifiers = modifiers
 		self.filters = filters
-		self.queue = queue
 
 	def run(self):
-		while True:
-			v = self.queue.get()
-			if v is None:
-				break
-			read = seqio.Sequence(*v)
+		for values in iter(self.queue.get, None):
+			read = seqio.Sequence(*values)
 			for modifier in self.modifiers:
 				read = modifier(read)
 			for filter in self.filters:
 				if filter(read):
 					break
-
 
 
 def process_single_reads(reader, modifiers, filters):
@@ -131,14 +127,20 @@ def process_single_reads(reader, modifiers, filters):
 	n = 0  # no. of processed reads
 	total_bp = 0
 	reads_queue = multiprocessing.Queue()
-	worker = Worker(reads_queue, modifiers, filters)
-	worker.start()
+	threads = 2
+	workers = []
+	for p in range(threads):
+		w = Worker(reads_queue, modifiers, filters)
+		w.start()
+		workers.append(w)
 	for read in reader:
 		n += 1
 		total_bp += len(read.sequence)
 		reads_queue.put((read.name, read.sequence, read.qualities))
-	reads_queue.put(None)
-	worker.join()
+	for worker in workers:
+		reads_queue.put(None)
+	for worker in workers:
+		worker.join()
 	return Statistics(n=n, total_bp1=total_bp, total_bp2=None)
 
 

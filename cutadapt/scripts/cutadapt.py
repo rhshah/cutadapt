@@ -65,6 +65,7 @@ import sys
 import time
 import errno
 from optparse import OptionParser, OptionGroup, SUPPRESS_HELP
+import multiprocessing
 import functools
 import logging
 import platform
@@ -99,31 +100,50 @@ class RestFileWriter(object):
 			print(rest, match.read.name, file=self.file)
 
 
+
+class Worker(multiprocessing.Process):
+	def __init__(self, queue, modifiers, filters):
+		super(Worker, self).__init__()
+		self.modifiers = modifiers
+		self.filters = filters
+		self.queue = queue
+
+	def run(self):
+		while True:
+			read = self.queue.get()
+			if read is None:
+				break
+			for modifier in self.modifiers:
+				read = modifier(read)
+			for filter in self.filters:
+				if filter(read):
+					break
+
+
+
 def process_single_reads(reader, modifiers, filters):
 	"""
-	Loop over reads, find adapters, trim reads, apply modifiers and
-	output modified reads.
+	Apply modifiers and filters to each read.
 
 	Return a Statistics object.
 	"""
 	n = 0  # no. of processed reads
 	total_bp = 0
+	reads_queue = multiprocessing.Queue()
+	worker = Worker(reads_queue, modifiers, filters)
+	worker.start()
 	for read in reader:
 		n += 1
 		total_bp += len(read.sequence)
-		for modifier in modifiers:
-			read = modifier(read)
-		for filter in filters:
-			if filter(read):
-				break
-
+		reads_queue.put(read)
+	reads_queue.put(None)
+	worker.join()
 	return Statistics(n=n, total_bp1=total_bp, total_bp2=None)
 
 
 def process_paired_reads(paired_reader, modifiers1, modifiers2, filters):
 	"""
-	Loop over reads, find adapters, trim reads, apply modifiers and
-	output modified reads.
+	Apply modifiers and filters to each read.
 
 	Return a Statistics object.
 	"""

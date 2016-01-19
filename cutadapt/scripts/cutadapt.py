@@ -102,20 +102,32 @@ class RestFileWriter(object):
 
 
 class Worker(multiprocessing.Process):
-	def __init__(self, queue, modifiers, filters):
+	def __init__(self, queue, result_queue, modifiers):
 		super(Worker, self).__init__()
 		self.queue = queue
 		self.modifiers = modifiers
-		self.filters = filters
+		self.queue = queue
+		self.result_queue = result_queue
 
 	def run(self):
 		for values in iter(self.queue.get, None):
 			read = seqio.Sequence(*values)
 			for modifier in self.modifiers:
 				read = modifier(read)
-			for filter in self.filters:
-				if filter(read):
-					break
+			self.result_queue.put((read.name, read.sequence, read.qualities))
+
+
+def reader_process(reads_queue, reader, threads):
+	n = 0
+	total_bp = 0
+	for read in reader:
+		n += 1
+		total_bp += len(read.sequence)
+		reads_queue.put((read.name, read.sequence, read.qualities))
+
+	# tell all the workers to stop
+	for _ in range(threads):
+		reads_queue.put(None)
 
 
 def process_single_reads(reader, modifiers, filters):
@@ -124,23 +136,29 @@ def process_single_reads(reader, modifiers, filters):
 
 	Return a Statistics object.
 	"""
+	threads = 2
 	n = 0  # no. of processed reads
 	total_bp = 0
 	reads_queue = multiprocessing.Queue()
-	threads = 2
+	result_queue = multiprocessing.Queue()
+	reader_worker = multiprocessing.Process(target=reader_process, args=(reads_queue, reader, threads))
+	reader_worker.start()
 	workers = []
 	for p in range(threads):
-		w = Worker(reads_queue, modifiers, filters)
-		w.start()
-		workers.append(w)
-	for read in reader:
-		n += 1
-		total_bp += len(read.sequence)
-		reads_queue.put((read.name, read.sequence, read.qualities))
-	for worker in workers:
-		reads_queue.put(None)
+		worker = Worker(reads_queue, result_queue, modifiers)
+		worker.start()
+		workers.append(worker)
+
+	# Get processed reads from the result queue and filter them (which will
+	# also write them to the output files)
+	for read in iter(result_queue.get, None):
+		for filter in filters:
+			if filter(read):
+				break
+
 	for worker in workers:
 		worker.join()
+	reader_worker.join()
 	return Statistics(n=n, total_bp1=total_bp, total_bp2=None)
 
 

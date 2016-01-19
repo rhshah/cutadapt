@@ -70,6 +70,8 @@ import functools
 import logging
 import platform
 import textwrap
+import cProfile  # TODO remove
+import zmq
 
 from cutadapt import seqio, __version__
 from cutadapt.xopen import xopen
@@ -100,6 +102,19 @@ class RestFileWriter(object):
 			print(rest, match.read.name, file=self.file)
 
 
+def worker_process(queue, result_queue, modifiers):
+	for values in iter(queue.get, None):
+		read = seqio.Sequence(*values)
+		for modifier in modifiers:
+			read = modifier(read)
+		result_queue.put((read.name, read.sequence, read.qualities))
+	result_queue.put(None)
+
+
+def profile_worker_process(queue, result_queue, modifiers, _index=[1]):
+	cProfile.runctx('worker_process(queue, result_queue, modifiers)', globals(), locals(), 'profile-worker-%d.prof'%_index[0])
+	_index[0] += 1
+
 
 class Worker(multiprocessing.Process):
 	def __init__(self, queue, result_queue, modifiers):
@@ -115,6 +130,7 @@ class Worker(multiprocessing.Process):
 			for modifier in self.modifiers:
 				read = modifier(read)
 			self.result_queue.put((read.name, read.sequence, read.qualities))
+		self.result_queue.put(None)
 
 
 def reader_process(reads_queue, reader, threads):
@@ -128,6 +144,10 @@ def reader_process(reads_queue, reader, threads):
 	# tell all the workers to stop
 	for _ in range(threads):
 		reads_queue.put(None)
+
+
+def profile_reader_process(reads_queue, reader, threads):
+	cProfile.runctx('reader_process(reads_queue,reader,threads)', globals(), locals(), 'profile-reader.prof')
 
 
 def process_single_reads(reader, modifiers, filters):
@@ -145,17 +165,20 @@ def process_single_reads(reader, modifiers, filters):
 	reader_worker.start()
 	workers = []
 	for p in range(threads):
-		worker = Worker(reads_queue, result_queue, modifiers)
+		worker = multiprocessing.Process(target=worker_process, args=(reads_queue, result_queue, modifiers))
 		worker.start()
 		workers.append(worker)
 
 	# Get processed reads from the result queue and filter them (which will
 	# also write them to the output files)
-	for read in iter(result_queue.get, None):
-		for filter in filters:
-			if filter(read):
-				break
-
+	for _ in workers:
+		for values in iter(result_queue.get, None):
+			read = seqio.Sequence(*values)
+			for filter in filters:
+				if filter(read):
+					break
+	logger.info('end of loop over result_queue')
+	logger.debug('hello')
 	for worker in workers:
 		worker.join()
 	reader_worker.join()

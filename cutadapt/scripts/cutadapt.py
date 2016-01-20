@@ -102,13 +102,21 @@ class RestFileWriter(object):
 			print(rest, match.read.name, file=self.file)
 
 
-def worker_process(queue, result_queue, modifiers):
-	for values in iter(queue.get, None):
-		read = seqio.Sequence(*values)
+def worker_process(modifiers):
+	context = zmq.Context()
+	reads_socket = context.socket(zmq.PULL)
+	reads_socket.connect('tcp://localhost:22991')
+
+	results_socket = context.socket(zmq.PUSH)
+	results_socket.connect('tcp://localhost:22992')
+
+	for values in iter(reads_socket.recv, ''):
+		print('values:', values)
+		read = seqio.Sequence(*values.split('\n'))
 		for modifier in modifiers:
 			read = modifier(read)
-		result_queue.put((read.name, read.sequence, read.qualities))
-	result_queue.put(None)
+		results_socket.send('\n'.join((read.name, read.sequence, read.qualities)))
+	results_socket.send('')
 
 
 def profile_worker_process(queue, result_queue, modifiers, _index=[1]):
@@ -116,34 +124,21 @@ def profile_worker_process(queue, result_queue, modifiers, _index=[1]):
 	_index[0] += 1
 
 
-class Worker(multiprocessing.Process):
-	def __init__(self, queue, result_queue, modifiers):
-		super(Worker, self).__init__()
-		self.queue = queue
-		self.modifiers = modifiers
-		self.queue = queue
-		self.result_queue = result_queue
+def reader_process(reader, threads):
+	context = zmq.Context()
+	socket = context.socket(zmq.PUSH)
+	socket.bind('tcp://*:22991')
 
-	def run(self):
-		for values in iter(self.queue.get, None):
-			read = seqio.Sequence(*values)
-			for modifier in self.modifiers:
-				read = modifier(read)
-			self.result_queue.put((read.name, read.sequence, read.qualities))
-		self.result_queue.put(None)
-
-
-def reader_process(reads_queue, reader, threads):
 	n = 0
 	total_bp = 0
 	for read in reader:
 		n += 1
 		total_bp += len(read.sequence)
-		reads_queue.put((read.name, read.sequence, read.qualities))
+		socket.send('\n'.join((read.name, read.sequence, read.qualities)))
 
 	# tell all the workers to stop
 	for _ in range(threads):
-		reads_queue.put(None)
+		socket.send('')
 
 
 def profile_reader_process(reads_queue, reader, threads):
@@ -159,26 +154,28 @@ def process_single_reads(reader, modifiers, filters):
 	threads = 2
 	n = 0  # no. of processed reads
 	total_bp = 0
-	reads_queue = multiprocessing.Queue()
-	result_queue = multiprocessing.Queue()
-	reader_worker = multiprocessing.Process(target=reader_process, args=(reads_queue, reader, threads))
+
+	context = zmq.Context()
+	results_socket = context.socket(zmq.PULL)
+	results_socket.bind('tcp://*:22992')
+
+	reader_worker = multiprocessing.Process(target=reader_process, args=(reader, threads))
 	reader_worker.start()
 	workers = []
 	for p in range(threads):
-		worker = multiprocessing.Process(target=worker_process, args=(reads_queue, result_queue, modifiers))
+		worker = multiprocessing.Process(target=worker_process, args=(modifiers,))
 		worker.start()
 		workers.append(worker)
 
 	# Get processed reads from the result queue and filter them (which will
 	# also write them to the output files)
 	for _ in workers:
-		for values in iter(result_queue.get, None):
-			read = seqio.Sequence(*values)
+		for values in iter(results_socket.recv, ''):
+			read = seqio.Sequence(*values.split('\n'))
 			for filter in filters:
 				if filter(read):
 					break
 	logger.info('end of loop over result_queue')
-	logger.debug('hello')
 	for worker in workers:
 		worker.join()
 	reader_worker.join()

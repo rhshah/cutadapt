@@ -102,21 +102,31 @@ class RestFileWriter(object):
 			print(rest, match.read.name, file=self.file)
 
 
+def log(*args):
+	print(multiprocessing.current_process().name, *args)
+
+
 def worker_process(modifiers):
+	log('worker started')
 	context = zmq.Context()
 	reads_socket = context.socket(zmq.PULL)
 	reads_socket.connect('tcp://localhost:22991')
+	reads_socket.hwm = 100
 
 	results_socket = context.socket(zmq.PUSH)
 	results_socket.connect('tcp://localhost:22992')
 
+	n = 0
 	for values in iter(reads_socket.recv, ''):
-		print('values:', values)
 		read = seqio.Sequence(*values.split('\n'))
 		for modifier in modifiers:
 			read = modifier(read)
 		results_socket.send('\n'.join((read.name, read.sequence, read.qualities)))
+		n += 1
+		log('sent', n, 'processed reads')
+	log('worker sending empty string')
 	results_socket.send('')
+	log('worker finished')
 
 
 def profile_worker_process(queue, result_queue, modifiers, _index=[1]):
@@ -125,10 +135,18 @@ def profile_worker_process(queue, result_queue, modifiers, _index=[1]):
 
 
 def reader_process(reader, threads):
+	log('READER started')
 	context = zmq.Context()
 	socket = context.socket(zmq.PUSH)
 	socket.bind('tcp://*:22991')
+	socket.hwm = 100
 
+	#
+	# TODO
+	# - set high water mark
+
+	# Wait a bit to ensure that all the worker processes have started up
+	time.sleep(0.2)  # TODO should use some type of synchronization data structure
 	n = 0
 	total_bp = 0
 	for read in reader:
@@ -137,6 +155,7 @@ def reader_process(reader, threads):
 		socket.send('\n'.join((read.name, read.sequence, read.qualities)))
 
 	# tell all the workers to stop
+	log('READER sending empty strings')
 	for _ in range(threads):
 		socket.send('')
 

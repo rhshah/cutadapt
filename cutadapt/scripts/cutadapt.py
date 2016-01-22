@@ -70,7 +70,7 @@ import functools
 import logging
 import platform
 import textwrap
-import cProfile  # TODO remove
+import cProfile, random  # TODO remove
 import zmq
 
 from cutadapt import seqio, __version__
@@ -106,27 +106,40 @@ def log(*args):
 	print(multiprocessing.current_process().name, *args)
 
 
-def worker_process(modifiers):
-	log('worker started')
+def worker_process(modifiers, ready_event, stop_event):
+	log('WORKER started')
 	context = zmq.Context()
 	reads_socket = context.socket(zmq.PULL)
 	reads_socket.connect('tcp://localhost:22991')
-	reads_socket.hwm = 100
+	reads_socket.hwm = 10
 
 	results_socket = context.socket(zmq.PUSH)
 	results_socket.connect('tcp://localhost:22992')
 
+	time.sleep(2 + random.random() * 3)
+	# Signal to the reader process that this worker is ready
+	ready_event.set()
+
+	log('WORKER signalling ready')
 	n = 0
-	for values in iter(reads_socket.recv, ''):
+	while True:
+		events = reads_socket.poll(timeout=0.5)
+		if events == 0:
+			if stop_event.isset():
+				break
+			else:
+				continue
+		values = reads_socket.recv_string()
+		log('WORKER received read', n+1)
 		read = seqio.Sequence(*values.split('\n'))
 		for modifier in modifiers:
 			read = modifier(read)
 		results_socket.send('\n'.join((read.name, read.sequence, read.qualities)))
 		n += 1
-		log('sent', n, 'processed reads')
-	log('worker sending empty string')
-	results_socket.send('')
-	log('worker finished')
+		log('WORKER sent processed read', n)
+	log('WORKER sending empty string')
+	results_socket.send(b'')
+	log('WORKER finished')
 
 
 def profile_worker_process(queue, result_queue, modifiers, _index=[1]):
@@ -134,30 +147,27 @@ def profile_worker_process(queue, result_queue, modifiers, _index=[1]):
 	_index[0] += 1
 
 
-def reader_process(reader, threads):
+def reader_process(reader, ready_events, queue):
 	log('READER started')
 	context = zmq.Context()
 	socket = context.socket(zmq.PUSH)
 	socket.bind('tcp://*:22991')
 	socket.hwm = 100
 
-	#
-	# TODO
-	# - set high water mark
+	# Wait until all the worker processes have started up
+	for event in ready_events:
+		event.wait()
 
-	# Wait a bit to ensure that all the worker processes have started up
-	time.sleep(0.2)  # TODO should use some type of synchronization data structure
 	n = 0
 	total_bp = 0
 	for read in reader:
 		n += 1
 		total_bp += len(read.sequence)
+		log('READER sending read', n)
 		socket.send('\n'.join((read.name, read.sequence, read.qualities)))
 
-	# tell all the workers to stop
-	log('READER sending empty strings')
-	for _ in range(threads):
-		socket.send('')
+	# Tell the main process how many reads there are
+	queue.put((n, total_bp)
 
 
 def profile_reader_process(reads_queue, reader, threads):
@@ -178,11 +188,13 @@ def process_single_reads(reader, modifiers, filters):
 	results_socket = context.socket(zmq.PULL)
 	results_socket.bind('tcp://*:22992')
 
-	reader_worker = multiprocessing.Process(target=reader_process, args=(reader, threads))
+	stats_queue = multiprocessing.Queue()
+	worker_ready_events = [ multiprocessing.Event() for _ in range(threads) ]
+	reader_worker = multiprocessing.Process(target=reader_process, args=(reader, worker_ready_events, stats_queue))
 	reader_worker.start()
 	workers = []
 	for p in range(threads):
-		worker = multiprocessing.Process(target=worker_process, args=(modifiers,))
+		worker = multiprocessing.Process(target=worker_process, args=(modifiers, worker_ready_events[p]))
 		worker.start()
 		workers.append(worker)
 

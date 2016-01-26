@@ -106,72 +106,68 @@ def log(*args):
 	print(multiprocessing.current_process().name, *args)
 
 
-def worker_process(modifiers, ready_event, stop_event):
+def worker_process(modifiers): #, ready_event, stop_event):
 	log('WORKER started')
 	context = zmq.Context()
-	reads_socket = context.socket(zmq.PULL)
-	reads_socket.connect('tcp://localhost:22991')
-	reads_socket.hwm = 10
+	reads_socket = context.socket(zmq.REQ)
+	reads_socket.connect('ipc://reader_sock')#tcp://localhost:22991')
+	#reads_socket.hwm = 10
 
 	results_socket = context.socket(zmq.PUSH)
-	results_socket.connect('tcp://localhost:22992')
+	results_socket.connect('ipc://results_sock')#'tcp://localhost:22992')
 
-	time.sleep(2 + random.random() * 3)
+	#time.sleep(2 + random.random() * 3)
 	# Signal to the reader process that this worker is ready
-	ready_event.set()
+	#ready_event.set()
 
-	log('WORKER signalling ready')
+	log('WORKER asking for work')
 	n = 0
-	while True:
-		events = reads_socket.poll(timeout=0.5)
-		if events == 0:
-			if stop_event.isset():
-				break
-			else:
-				continue
-		values = reads_socket.recv_string()
-		log('WORKER received read', n+1)
+	reads_socket.send(b'')  # request work
+	for values in iter(reads_socket.recv, 'STOP'):
+		#log('WORKER received read', n+1)
 		read = seqio.Sequence(*values.split('\n'))
 		for modifier in modifiers:
 			read = modifier(read)
 		results_socket.send('\n'.join((read.name, read.sequence, read.qualities)))
 		n += 1
-		log('WORKER sent processed read', n)
+		#log('WORKER sent processed read and requests more', n)
+		reads_socket.send(b'')  # request work
+
 	log('WORKER sending empty string')
 	results_socket.send(b'')
 	log('WORKER finished')
 
 
-def profile_worker_process(queue, result_queue, modifiers, _index=[1]):
-	cProfile.runctx('worker_process(queue, result_queue, modifiers)', globals(), locals(), 'profile-worker-%d.prof'%_index[0])
+def profile_worker_process(modifiers, _index=[1]):
+	cProfile.runctx('worker_process(modifiers)', globals(), locals(), 'profile-worker-%d.prof'%_index[0])
 	_index[0] += 1
 
 
-def reader_process(reader, ready_events, queue):
+def reader_process(reader, threads):
 	log('READER started')
 	context = zmq.Context()
-	socket = context.socket(zmq.PUSH)
-	socket.bind('tcp://*:22991')
-	socket.hwm = 100
-
-	# Wait until all the worker processes have started up
-	for event in ready_events:
-		event.wait()
+	socket = context.socket(zmq.REP)
+	socket.bind('ipc://reader_sock')#tcp://*:22991')
 
 	n = 0
 	total_bp = 0
 	for read in reader:
 		n += 1
 		total_bp += len(read.sequence)
-		log('READER sending read', n)
+		# Wait for a worker to request work (via an empty message that we ignore)
+		_ = socket.recv()
+		#log('READER sending read', n)
+		# TODO PY3 wants bytes here
 		socket.send('\n'.join((read.name, read.sequence, read.qualities)))
 
-	# Tell the main process how many reads there are
-	queue.put((n, total_bp)
+	for _ in range(threads):
+		_ = socket.recv()
+		log('READER telling worker to stop')
+		socket.send('STOP')  # TODO PY3 bytes
 
 
-def profile_reader_process(reads_queue, reader, threads):
-	cProfile.runctx('reader_process(reads_queue,reader,threads)', globals(), locals(), 'profile-reader.prof')
+def profile_reader_process(reader, threads):
+	cProfile.runctx('reader_process(reader,threads)', globals(), locals(), 'profile-reader.prof')
 
 
 def process_single_reads(reader, modifiers, filters):
@@ -185,16 +181,15 @@ def process_single_reads(reader, modifiers, filters):
 	total_bp = 0
 
 	context = zmq.Context()
-	results_socket = context.socket(zmq.PULL)
-	results_socket.bind('tcp://*:22992')
 
-	stats_queue = multiprocessing.Queue()
-	worker_ready_events = [ multiprocessing.Event() for _ in range(threads) ]
-	reader_worker = multiprocessing.Process(target=reader_process, args=(reader, worker_ready_events, stats_queue))
+	results_socket = context.socket(zmq.PULL)
+	results_socket.bind('ipc://results_sock') #'tcp://*:22992')
+
+	reader_worker = multiprocessing.Process(target=reader_process, args=(reader, threads))  # , worker_ready_events, stats_queue
 	reader_worker.start()
 	workers = []
 	for p in range(threads):
-		worker = multiprocessing.Process(target=worker_process, args=(modifiers, worker_ready_events[p]))
+		worker = multiprocessing.Process(target=worker_process, args=(modifiers,))  # , worker_ready_events[p]
 		worker.start()
 		workers.append(worker)
 
@@ -206,7 +201,6 @@ def process_single_reads(reader, modifiers, filters):
 			for filter in filters:
 				if filter(read):
 					break
-	logger.info('end of loop over result_queue')
 	for worker in workers:
 		worker.join()
 	reader_worker.join()

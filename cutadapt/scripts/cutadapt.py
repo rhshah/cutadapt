@@ -71,7 +71,6 @@ import logging
 import platform
 import textwrap
 import cProfile, random  # TODO remove
-import zmq
 
 from cutadapt import seqio, __version__
 from cutadapt.xopen import xopen
@@ -106,16 +105,9 @@ def log(*args):
 	print(multiprocessing.current_process().name, *args)
 
 
-def worker_process(modifiers):
-	context = zmq.Context()
-	reads_socket = context.socket(zmq.REQ)
-	reads_socket.connect('ipc://reader_sock')
-	results_socket = context.socket(zmq.PUSH)
-	results_socket.connect('ipc://results_sock')
-
+def worker_process(modifiers, reads_queue, results_queue):
 	n = 0
-	reads_socket.send(b'')  # request work
-	for values in iter(reads_socket.recv, 'STOP'):
+	for values in iter(reads_queue.get, 'STOP'):
 		results = []
 		for line in values.split('\n'):
 			read = seqio.Sequence(*line.split('\t'))
@@ -123,12 +115,11 @@ def worker_process(modifiers):
 				read = modifier(read)
 			results.append(read)
 			if len(results) == 1000:
-				results_socket.send('\n'.join('\t'.join((read.name, read.sequence, read.qualities)) for read in results), copy=False)
+				results_queue.put('\n'.join('\t'.join((read.name, read.sequence, read.qualities)) for read in results))
 				results = []
 			n += 1
-		reads_socket.send(b'')  # request work
 
-	results_socket.send(b'')
+	results_queue.put('')
 
 
 def profile_worker_process(modifiers, _index=[1]):
@@ -136,11 +127,7 @@ def profile_worker_process(modifiers, _index=[1]):
 	_index[0] += 1
 
 
-def reader_process(reader, threads):
-	context = zmq.Context()
-	socket = context.socket(zmq.REP)
-	socket.bind('ipc://reader_sock')
-
+def reader_process(reader, reads_queue, threads):
 	n = 0
 	total_bp = 0
 	reads = []
@@ -150,19 +137,13 @@ def reader_process(reader, threads):
 		reads.append(read)
 
 		if len(reads) == 1000:
-			# Wait for a worker to request work (via an empty message that we ignore)
-			_ = socket.recv()
-			# TODO PY3 wants bytes here
-
 			encoded = '\n'.join('\t'.join((read.name, read.sequence, read.qualities)) for read in reads)
-			socket.send(encoded, copy=False)
+			reads_queue.put(encoded)
 			reads = []
 
 	# TODO work on remaining reads
-
 	for _ in range(threads):
-		_ = socket.recv()
-		socket.send(b'STOP')  # TODO PY3 bytes
+		reads_queue.put('STOP')  # TODO PY3 bytes
 
 
 def profile_reader_process(reader, threads):
@@ -179,23 +160,22 @@ def process_single_reads(reader, modifiers, filters):
 	n = 0  # no. of processed reads
 	total_bp = 0
 
-	context = zmq.Context()
-
-	results_socket = context.socket(zmq.PULL)
-	results_socket.bind('ipc://results_sock')
-
-	reader_worker = multiprocessing.Process(target=reader_process, args=(reader, threads))
+	results_queue = multiprocessing.Queue()
+	reads_queue = multiprocessing.Queue()
+	reader_worker = multiprocessing.Process(target=reader_process, args=(reader, reads_queue, threads))
+	reader_worker.daemon = True
 	reader_worker.start()
 	workers = []
 	for p in range(threads):
-		worker = multiprocessing.Process(target=worker_process, args=(modifiers,))
+		worker = multiprocessing.Process(target=worker_process, args=(modifiers, reads_queue, results_queue))
+		worker.daemon = True
 		worker.start()
 		workers.append(worker)
 
 	# Get processed reads from the result queue and filter them (which will
 	# also write them to the output files)
 	for _ in workers:
-		for lines in iter(results_socket.recv, b''):
+		for lines in iter(results_queue.get, ''):
 			for values in lines.split('\n'):
 				read = seqio.Sequence(*values.split('\t'))
 				for filter in filters:

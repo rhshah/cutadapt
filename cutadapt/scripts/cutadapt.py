@@ -107,10 +107,10 @@ def log(*args):
 
 def worker_process(modifiers, reads_queue, results_queue):
 	n = 0
-	for values in iter(reads_queue.get, 'STOP'):
+	for reads in iter(reads_queue.get, 'STOP'):
 		results = []
-		for line in values.split('\n'):
-			read = seqio.Sequence(*line.split('\t'))
+		for read in reads:#valesvalues.split('\n'):
+			#read = seqio.Sequence(*line.split('\t'))
 			for modifier in modifiers:
 				read = modifier(read)
 			results.append(read)
@@ -137,8 +137,8 @@ def reader_process(reader, reads_queue, threads):
 		reads.append(read)
 
 		if len(reads) == 1000:
-			encoded = '\n'.join('\t'.join((read.name, read.sequence, read.qualities)) for read in reads)
-			reads_queue.put(encoded)
+			#encoded = '\n'.join('\t'.join((read.name, read.sequence, read.qualities)) for read in reads)
+			reads_queue.put(reads)#encoded)
 			reads = []
 
 	# TODO work on remaining reads

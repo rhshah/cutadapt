@@ -106,41 +106,29 @@ def log(*args):
 	print(multiprocessing.current_process().name, *args)
 
 
-def worker_process(modifiers): #, ready_event, stop_event):
-	log('WORKER started')
+def worker_process(modifiers):
 	context = zmq.Context()
 	reads_socket = context.socket(zmq.REQ)
-	reads_socket.connect('ipc://reader_sock')#tcp://localhost:22991')
-	#reads_socket.hwm = 10
-
+	reads_socket.connect('ipc://reader_sock')
 	results_socket = context.socket(zmq.PUSH)
-	results_socket.connect('ipc://results_sock')#'tcp://localhost:22992')
+	results_socket.connect('ipc://results_sock')
 
-	#time.sleep(2 + random.random() * 3)
-	# Signal to the reader process that this worker is ready
-	#ready_event.set()
-
-	log('WORKER asking for work')
 	n = 0
 	reads_socket.send(b'')  # request work
 	for values in iter(reads_socket.recv, 'STOP'):
 		results = []
-		#log('WORKER received read', n+1)
 		for line in values.split('\n'):
 			read = seqio.Sequence(*line.split('\t'))
 			for modifier in modifiers:
 				read = modifier(read)
 			results.append(read)
-			if len(results) == 10000:
-				results_socket.send('\n'.join('\t'.join((read.name, read.sequence, read.qualities)) for read in results))
+			if len(results) == 1000:
+				results_socket.send('\n'.join('\t'.join((read.name, read.sequence, read.qualities)) for read in results), copy=False)
 				results = []
 			n += 1
-		#log('WORKER sent processed read and requests more', n)
 		reads_socket.send(b'')  # request work
 
-	log('WORKER sending empty string')
 	results_socket.send(b'')
-	log('WORKER finished')
 
 
 def profile_worker_process(modifiers, _index=[1]):
@@ -149,10 +137,9 @@ def profile_worker_process(modifiers, _index=[1]):
 
 
 def reader_process(reader, threads):
-	log('READER started')
 	context = zmq.Context()
 	socket = context.socket(zmq.REP)
-	socket.bind('ipc://reader_sock')#tcp://*:22991')
+	socket.bind('ipc://reader_sock')
 
 	n = 0
 	total_bp = 0
@@ -162,22 +149,20 @@ def reader_process(reader, threads):
 		total_bp += len(read.sequence)
 		reads.append(read)
 
-		if len(reads) == 10000:
+		if len(reads) == 1000:
 			# Wait for a worker to request work (via an empty message that we ignore)
 			_ = socket.recv()
-			#log('READER sending read', n)
 			# TODO PY3 wants bytes here
 
 			encoded = '\n'.join('\t'.join((read.name, read.sequence, read.qualities)) for read in reads)
-			socket.send(encoded)
+			socket.send(encoded, copy=False)
 			reads = []
 
 	# TODO work on remaining reads
 
 	for _ in range(threads):
 		_ = socket.recv()
-		log('READER telling worker to stop')
-		socket.send('STOP')  # TODO PY3 bytes
+		socket.send(b'STOP')  # TODO PY3 bytes
 
 
 def profile_reader_process(reader, threads):
@@ -197,20 +182,20 @@ def process_single_reads(reader, modifiers, filters):
 	context = zmq.Context()
 
 	results_socket = context.socket(zmq.PULL)
-	results_socket.bind('ipc://results_sock') #'tcp://*:22992')
+	results_socket.bind('ipc://results_sock')
 
-	reader_worker = multiprocessing.Process(target=reader_process, args=(reader, threads))  # , worker_ready_events, stats_queue
+	reader_worker = multiprocessing.Process(target=reader_process, args=(reader, threads))
 	reader_worker.start()
 	workers = []
 	for p in range(threads):
-		worker = multiprocessing.Process(target=worker_process, args=(modifiers,))  # , worker_ready_events[p]
+		worker = multiprocessing.Process(target=worker_process, args=(modifiers,))
 		worker.start()
 		workers.append(worker)
 
 	# Get processed reads from the result queue and filter them (which will
 	# also write them to the output files)
 	for _ in workers:
-		for lines in iter(results_socket.recv, ''):
+		for lines in iter(results_socket.recv, b''):
 			for values in lines.split('\n'):
 				read = seqio.Sequence(*values.split('\t'))
 				for filter in filters:

@@ -124,12 +124,17 @@ def worker_process(modifiers): #, ready_event, stop_event):
 	n = 0
 	reads_socket.send(b'')  # request work
 	for values in iter(reads_socket.recv, 'STOP'):
+		results = []
 		#log('WORKER received read', n+1)
-		read = seqio.Sequence(*values.split('\n'))
-		for modifier in modifiers:
-			read = modifier(read)
-		results_socket.send('\n'.join((read.name, read.sequence, read.qualities)))
-		n += 1
+		for line in values.split('\n'):
+			read = seqio.Sequence(*line.split('\t'))
+			for modifier in modifiers:
+				read = modifier(read)
+			results.append(read)
+			if len(results) == 10000:
+				results_socket.send('\n'.join('\t'.join((read.name, read.sequence, read.qualities)) for read in results))
+				results = []
+			n += 1
 		#log('WORKER sent processed read and requests more', n)
 		reads_socket.send(b'')  # request work
 
@@ -151,14 +156,23 @@ def reader_process(reader, threads):
 
 	n = 0
 	total_bp = 0
+	reads = []
 	for read in reader:
 		n += 1
 		total_bp += len(read.sequence)
-		# Wait for a worker to request work (via an empty message that we ignore)
-		_ = socket.recv()
-		#log('READER sending read', n)
-		# TODO PY3 wants bytes here
-		socket.send('\n'.join((read.name, read.sequence, read.qualities)))
+		reads.append(read)
+
+		if len(reads) == 10000:
+			# Wait for a worker to request work (via an empty message that we ignore)
+			_ = socket.recv()
+			#log('READER sending read', n)
+			# TODO PY3 wants bytes here
+
+			encoded = '\n'.join('\t'.join((read.name, read.sequence, read.qualities)) for read in reads)
+			socket.send(encoded)
+			reads = []
+
+	# TODO work on remaining reads
 
 	for _ in range(threads):
 		_ = socket.recv()
@@ -196,11 +210,12 @@ def process_single_reads(reader, modifiers, filters):
 	# Get processed reads from the result queue and filter them (which will
 	# also write them to the output files)
 	for _ in workers:
-		for values in iter(results_socket.recv, ''):
-			read = seqio.Sequence(*values.split('\n'))
-			for filter in filters:
-				if filter(read):
-					break
+		for lines in iter(results_socket.recv, ''):
+			for values in lines.split('\n'):
+				read = seqio.Sequence(*values.split('\t'))
+				for filter in filters:
+					if filter(read):
+						break
 	for worker in workers:
 		worker.join()
 	reader_worker.join()

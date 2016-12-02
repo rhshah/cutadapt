@@ -69,8 +69,10 @@ import functools
 import logging
 import platform
 import textwrap
-from xopen import xopen
+import traceback
+from multiprocessing import Process, Queue
 
+from xopen import xopen
 from cutadapt import seqio, __version__
 from cutadapt.adapters import AdapterParser
 from cutadapt.modifiers import (LengthTagModifier, SuffixRemover, PrefixSuffixAdder,
@@ -138,13 +140,35 @@ class Pipeline(object):
 		return stats
 
 
+def reader_process(reader, reads_queue, threads=1):  # TODO remove =1
+	reads = []
+	try:
+		for read in reader:
+			reads.append(read)
+			if len(reads) == 1000:
+				reads_queue.put(reads)
+				reads = []
+		if reads:
+			reads_queue.put(reads)
+
+		for _ in range(threads):
+			reads_queue.put('STOP')  # TODO PY3 bytes
+
+	except Exception as e:
+		traceb = traceback.format_exc()
+		reads_queue.put((e, traceb))
+
+
 class SingleEndPipeline(Pipeline):
 	"""
 	Processing pipeline for single-end reads
 	"""
 	def __init__(self, adapters, adapters2, reader, modifiers, filters):
 		super(SingleEndPipeline, self).__init__(adapters, adapters2)
-		self.reader = reader
+		self._reader_queue = Queue(maxsize=100)
+		self._reader_process = Process(target=reader_process, args=(reader, self._reader_queue))
+		self._reader_process.daemon = True
+		self._reader_process.start()
 		self.modifiers = modifiers
 		self.filters = filters
 
@@ -152,14 +176,18 @@ class SingleEndPipeline(Pipeline):
 		"""Run the pipeline. Return a Statistics object"""
 		n = 0  # no. of processed reads
 		total_bp = 0
-		for read in self.reader:
-			n += 1
-			total_bp += len(read.sequence)
-			for modifier in self.modifiers:
-				read = modifier(read)
-			for filter in self.filters:
-				if filter(read):
-					break
+		for reads in iter(self._reader_queue.get, 'STOP'):
+			if isinstance(reads, tuple):
+				e, tb = reads
+				raise e  # TODO use traceback from the original exception
+			for read in reads:
+				n += 1
+				total_bp += len(read.sequence)
+				for modifier in self.modifiers:
+					read = modifier(read)
+				for filter in self.filters:
+					if filter(read):
+						break
 		return Statistics(n=n, total_bp1=total_bp, total_bp2=None)
 
 

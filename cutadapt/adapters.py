@@ -193,7 +193,8 @@ class Match(object):
 	"""
 	TODO creating instances of this class is relatively slow and responsible for quite some runtime.
 	"""
-	__slots__ = ['astart', 'astop', 'rstart', 'rstop', 'matches', 'errors', 'front', 'adapter', 'read', 'length']
+	__slots__ = ['astart', 'astop', 'rstart', 'rstop', 'matches', 'errors', 'front', 'adapter',
+		'read', 'length']
 
 	def __init__(self, astart, astop, rstart, rstop, matches, errors, front, adapter, read):
 		self.astart = astart
@@ -212,6 +213,16 @@ class Match(object):
 		assert self.length > 0
 		assert self.errors / self.length <= self.adapter.max_error_rate
 		assert self.length - self.errors > 0
+
+		# redirect trimmed() to appropriate function depending on adapter type
+		trimmers = {
+			FRONT: self._trimmed_front,
+			PREFIX: self._trimmed_front,
+			BACK: self._trimmed_back,
+			SUFFIX: self._trimmed_back,
+			ANYWHERE: self._trimmed_anywhere
+		}
+		self.trimmed = trimmers[self.adapter.where]
 
 	def __repr__(self):
 		return 'Match(astart={0}, astop={1}, rstart={2}, rstop={3}, matches={4}, errors={5})'.format(
@@ -275,6 +286,63 @@ class Match(object):
 		
 		return info
 
+	def _trimmed_anywhere(self):
+		"""Return a trimmed read"""
+		if self.front:
+			return self._trimmed_front()
+		else:
+			return self._trimmed_back()
+
+	def _trimmed_front(self):
+		"""Return a trimmed read"""
+		# TODO move away/fix
+		#self.lengths_front[match.rstop] += 1
+		#self.errors_front[match.rstop][match.errors] += 1
+		#self.length_removed = ...
+		return self.read[self.rstop:]
+
+	def _trimmed_back(self):
+		"""Return a trimmed read without the 3' (back) adapter"""
+		# TODO move away/fix
+		#self.lengths_back[len(match.read) - match.rstart] += 1
+		#self.errors_back[len(match.read) - match.rstart][match.errors] += 1
+		#self.length_removed = ...
+		adjacent_base = self.read.sequence[self.rstart-1:self.rstart]
+		if adjacent_base not in 'ACGT':
+			adjacent_base = ''
+		# TODO self.adjacent_bases[adjacent_base] += 1
+		# TODO self.adjacent_base = adjacent_base
+		return self.read[:self.rstart]
+
+
+class ColorspaceMatch(Match):
+
+	def _trimmed_front(self):
+		"""Return a trimmed read"""
+		read = self.read
+		# TODO
+		# self.lengths_front[self.rstop] += 1
+		# self.errors_front[self.rstop][self.errors] += 1
+		# to remove a front adapter, we need to re-encode the first color following the adapter match
+		color_after_adapter = read.sequence[self.rstop:self.rstop + 1]
+		if not color_after_adapter:
+			# the read is empty
+			return read[self.rstop:]
+		base_after_adapter = colorspace.DECODE[self.adapter.nucleotide_sequence[-1:] + color_after_adapter]
+		new_first_color = colorspace.ENCODE[read.primer + base_after_adapter]
+		new_read = read[:]
+		new_read.sequence = new_first_color + read.sequence[(self.rstop + 1):]
+		new_read.qualities = read.qualities[self.rstop:] if read.qualities else None
+		return new_read
+
+	def _trimmed_back(self):
+		"""Return a trimmed read"""
+		# trim one more color if long enough
+		adjusted_rstart = max(self.rstart - 1, 0)
+		# TODO self.lengths_back[len(self.read) - adjusted_rstart] += 1
+		# TODO self.errors_back[len(self.read) - adjusted_rstart][self.errors] += 1
+		return self.read[:adjusted_rstart]
+
 
 def _generate_adapter_name(_start=[1]):
 	name = str(_start[0])
@@ -323,15 +391,6 @@ class Adapter(object):
 		self.indels = indels
 		self.adapter_wildcards = adapter_wildcards and not set(self.sequence) <= set('ACGT')
 		self.read_wildcards = read_wildcards
-		# redirect trimmed() to appropriate function depending on adapter type
-		trimmers = {
-			FRONT: self._trimmed_front,
-			PREFIX: self._trimmed_front,
-			BACK: self._trimmed_back,
-			SUFFIX: self._trimmed_back,
-			ANYWHERE: self._trimmed_anywhere
-		}
-		self.trimmed = trimmers[where]
 		if where == ANYWHERE:
 			self._front_flag = None  # means: guess
 		else:
@@ -419,31 +478,6 @@ class Adapter(object):
 		assert match.length >= self.min_overlap
 		return match
 
-	def _trimmed_anywhere(self, match):
-		"""Return a trimmed read"""
-		if match.front:
-			return self._trimmed_front(match)
-		else:
-			return self._trimmed_back(match)
-
-	def _trimmed_front(self, match):
-		"""Return a trimmed read"""
-		# TODO move away
-		self.lengths_front[match.rstop] += 1
-		self.errors_front[match.rstop][match.errors] += 1
-		return match.read[match.rstop:]
-
-	def _trimmed_back(self, match):
-		"""Return a trimmed read without the 3' (back) adapter"""
-		# TODO move away
-		self.lengths_back[len(match.read) - match.rstart] += 1
-		self.errors_back[len(match.read) - match.rstart][match.errors] += 1
-		adjacent_base = match.read.sequence[match.rstart-1:match.rstart]
-		if adjacent_base not in 'ACGT':
-			adjacent_base = ''
-		self.adjacent_bases[adjacent_base] += 1
-		return match.read[:match.rstart]
-
 	def __len__(self):
 		return len(self.sequence)
 
@@ -471,7 +505,7 @@ class ColorspaceAdapter(Adapter):
 
 		pos = 0 if read.sequence.startswith(asequence) else -1
 		if pos >= 0:
-			match = Match(
+			match = ColorspaceMatch(
 				0, len(asequence), pos, pos + len(asequence),
 				len(asequence), 0, self._front_flag, self, read)
 		else:
@@ -481,7 +515,7 @@ class ColorspaceAdapter(Adapter):
 			if self.debug:
 				print(self.aligner.dpmatrix)  # pragma: no cover
 			if alignment is not None:
-				match = Match(*(alignment + (self._front_flag, self, read)))
+				match = ColorspaceMatch(*(alignment + (self._front_flag, self, read)))
 			else:
 				match = None
 
@@ -490,31 +524,6 @@ class ColorspaceAdapter(Adapter):
 		assert match.length > 0 and match.errors / match.length <= self.max_error_rate
 		assert match.length >= self.min_overlap
 		return match
-
-	def _trimmed_front(self, match):
-		"""Return a trimmed read"""
-		read = match.read
-		self.lengths_front[match.rstop] += 1
-		self.errors_front[match.rstop][match.errors] += 1
-		# to remove a front adapter, we need to re-encode the first color following the adapter match
-		color_after_adapter = read.sequence[match.rstop:match.rstop + 1]
-		if not color_after_adapter:
-			# the read is empty
-			return read[match.rstop:]
-		base_after_adapter = colorspace.DECODE[self.nucleotide_sequence[-1:] + color_after_adapter]
-		new_first_color = colorspace.ENCODE[read.primer + base_after_adapter]
-		new_read = read[:]
-		new_read.sequence = new_first_color + read.sequence[(match.rstop + 1):]
-		new_read.qualities = read.qualities[match.rstop:] if read.qualities else None
-		return new_read
-
-	def _trimmed_back(self, match):
-		"""Return a trimmed read"""
-		# trim one more color if long enough
-		adjusted_rstart = max(match.rstart - 1, 0)
-		self.lengths_back[len(match.read) - adjusted_rstart] += 1
-		self.errors_back[len(match.read) - adjusted_rstart][match.errors] += 1
-		return match.read[:adjusted_rstart]
 
 	def __repr__(self):
 		return '<ColorspaceAdapter(sequence={0!r}, where={1})>'.format(self.sequence, self.where)
@@ -540,6 +549,17 @@ class LinkedMatch(object):
 		if self.back_match is not None:
 			m += self.back_match.matches
 		return m
+
+	def trimmed(self):
+		if self.front_match and self.back_match:
+			# TODO
+			# This does nothing except update the statistics
+			self.front_adapter.trimmed(self.front_match)
+			return self.back_adapter.trimmed(self.back_match)
+		elif self.back_match:
+			return self.back_adapter.trimmed(self.back_match)
+		elif self.front_match :
+			return self.front_adapter.trimmed(self.front_match)
 
 
 class LinkedAdapter(object):
@@ -582,17 +602,6 @@ class LinkedAdapter(object):
 		if back_match is None and (self.back_anchored or front_match is None):
 			return None
 		return LinkedMatch(front_match, back_match, self)
-
-	def trimmed(self, match):
-		if match.front_match and match.back_match:
-			# TODO
-			# This does nothing except update the statistics
-			self.front_adapter.trimmed(match.front_match)
-			return self.back_adapter.trimmed(match.back_match)
-		elif match.back_match:
-			return self.back_adapter.trimmed(match.back_match)
-		elif match.front_match :
-			return self.front_adapter.trimmed(match.front_match)
 
 	# Lots of forwarders (needed for the report). I’m sure this can be done
 	# in a better way.

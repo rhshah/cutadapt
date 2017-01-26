@@ -7,6 +7,7 @@ need to be stored, and as a class with a __call__ method if there are parameters
 """
 from __future__ import print_function, division, absolute_import
 import re
+from collections import defaultdict
 from cutadapt.qualtrim import quality_trim_index, nextseq_trim_index
 from cutadapt.compat import maketrans
 
@@ -34,6 +35,17 @@ class AdapterCutter(object):
 		self.with_adapters = 0
 		self.keep_match_info = self.info_file is not None
 
+		class AdapterStatistics(object):
+			def __init__(self, adapter):
+				self.adapter = adapter
+				self.lengths_front = defaultdict(int)
+				self.lengths_back = defaultdict(int)
+				self.errors_front = defaultdict(lambda: defaultdict(int))
+				self.errors_back = defaultdict(lambda: defaultdict(int))
+				self.adjacent_bases = {'A': 0, 'C': 0, 'G': 0, 'T': 0, '': 0}
+
+		self.adapter_statistics = {a: AdapterStatistics(a) for a in adapters}
+
 	def _best_match(self, read):
 		"""
 		Find the best matching adapter in the given read.
@@ -54,10 +66,10 @@ class AdapterCutter(object):
 	def _write_info(self, read):
 		"""
 		Write to the info, wildcard and rest files.
+		"""
 		# TODO
 		# This design with a read having a .match attribute and
 		# a match having a .read attribute is really confusing.
-		"""
 		match = read.match
 		if self.rest_writer and match:
 			self.rest_writer.write(match)
@@ -98,6 +110,19 @@ class AdapterCutter(object):
 				break
 			matches.append(match)
 			trimmed_read = match.trimmed()
+
+			# Update statistics
+			stats = self.adapter_statistics[match.adapter]
+
+			WORKING_HERE
+		# 	self.lengths_front = {a: defaultdict(int) for a in adapters}
+		# self.lengths_back = {a: defaultdict(int) for a in adapters}
+		# self.errors_front = {a: defaultdict(lambda: defaultdict(int)) for a in adapters}
+		# self.errors_back = {a: defaultdict(lambda: defaultdict(int)) for a in adapters}
+		# adjacent_bases = {'A': 0, 'C': 0, 'G': 0, 'T': 0, '': 0}
+		# self.adjacent_bases
+
+
 			# TODO obtain stats here
 		
 		if not matches:
@@ -105,7 +130,7 @@ class AdapterCutter(object):
 			trimmed_read.match_info = None
 			self._write_info(trimmed_read)
 			return trimmed_read
-		
+
 		if __debug__:
 			assert len(trimmed_read) < len(read), "Trimmed read isn't shorter than original"
 

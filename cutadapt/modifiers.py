@@ -97,7 +97,8 @@ class AdapterCutter(object):
 				# nothing found
 				break
 			matches.append(match)
-			trimmed_read = match.adapter.trimmed(match)
+			trimmed_read = match.trimmed()
+			# TODO obtain stats here
 		
 		if not matches:
 			trimmed_read.match = None
@@ -116,7 +117,7 @@ class AdapterCutter(object):
 			masked_sequence = trimmed_read.sequence
 			for match in sorted(matches, reverse=True, key=lambda m: m.astart):
 				ns = 'N' * (len(match.read.sequence) -
-							len(match.adapter.trimmed(match).sequence))
+							len(match.trimmed().sequence))  # TODO is this correct? -> stats?
 				# add N depending on match position
 				if match.front:
 					masked_sequence = ns + masked_sequence
@@ -261,7 +262,7 @@ class QualityTrimmer(object):
 
 
 class Shortener(object):
-	"""Uncoditionally shorten a read to the given length"""
+	"""Unconditionally shorten a read to the given length"""
 	def __init__(self, length):
 		self.length = length
 

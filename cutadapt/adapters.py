@@ -214,16 +214,6 @@ class Match(object):
 		assert self.errors / self.length <= self.adapter.max_error_rate
 		assert self.length - self.errors > 0
 
-		# redirect trimmed() to appropriate function depending on adapter type
-		trimmers = {
-			FRONT: self._trimmed_front,
-			PREFIX: self._trimmed_front,
-			BACK: self._trimmed_back,
-			SUFFIX: self._trimmed_back,
-			ANYWHERE: self._trimmed_anywhere
-		}
-		self.trimmed = trimmers[self.adapter.where]
-
 	def __repr__(self):
 		return 'Match(astart={0}, astop={1}, rstart={2}, rstop={3}, matches={4}, errors={5})'.format(
 			self.astart, self.astop, self.rstart, self.rstop, self.matches, self.errors)
@@ -247,7 +237,8 @@ class Match(object):
 		is not available.
 		"""
 		wildcards = [ self.read.sequence[self.rstart + i:self.rstart + i + 1] for i in range(self.length)
-			if self.adapter.sequence[self.astart + i] == wildcard_char and self.rstart + i < len(self.read.sequence) ]
+			if self.adapter.sequence[self.astart + i] == wildcard_char and
+			   self.rstart + i < len(self.read.sequence) ]
 		return ''.join(wildcards)
 
 	def rest(self):
@@ -282,9 +273,17 @@ class Match(object):
 				qualities[self.rstop:]
 			)
 		else:
-			info += ('','','')
+			info += ('', '', '')
 		
 		return info
+
+	def trimmed(self):
+		if self.adapter.where in (BACK, SUFFIX):
+			return self._trimmed_back()
+		elif self.adapter.where in (FRONT, PREFIX):
+			return self._trimmed_front()
+		else:
+			return self._trimmed_anywhere()
 
 	def _trimmed_anywhere(self):
 		"""Return a trimmed read"""
@@ -316,6 +315,12 @@ class Match(object):
 
 
 class ColorspaceMatch(Match):
+
+	def trimmed(self):
+		if self.adapter.where in (BACK, SUFFIX):
+			return self._trimmed_back()
+		elif self.adapter.where in (FRONT, PREFIX):
+			return self._trimmed_front()
 
 	def _trimmed_front(self):
 		"""Return a trimmed read"""
@@ -352,9 +357,8 @@ def _generate_adapter_name(_start=[1]):
 
 class Adapter(object):
 	"""
-	An adapter knows how to match itself to a read.
-	In particular, it knows where it should be within the read and how to interpret
-	wildcard characters.
+	This class can find a single adapter characterized by sequence, error rate,
+	type etc. within reads.
 
 	where --  One of the BACK, FRONT, PREFIX, SUFFIX or ANYWHERE constants.
 		This influences where the adapter is allowed to appear within in the
@@ -378,11 +382,12 @@ class Adapter(object):
 	name -- optional name of the adapter. If not provided, the name is set to a
 		unique number.
 	"""
+
 	def __init__(self, sequence, where, max_error_rate=0.1, min_overlap=3,
 			read_wildcards=False, adapter_wildcards=True, name=None, indels=True):
 		self.debug = False
 		self.name = _generate_adapter_name() if name is None else name
-		self.sequence = parse_braces(sequence.upper().replace('U', 'T'))
+		self.sequence = parse_braces(sequence.upper().replace('U', 'T'))  # TODO move away
 		if not self.sequence:
 			raise ValueError('Sequence is empty')
 		self.where = where
@@ -395,12 +400,6 @@ class Adapter(object):
 			self._front_flag = None  # means: guess
 		else:
 			self._front_flag = where not in (BACK, SUFFIX)
-		# statistics about length of removed sequences
-		self.lengths_front = defaultdict(int)
-		self.lengths_back = defaultdict(int)
-		self.errors_front = defaultdict(lambda: defaultdict(int))
-		self.errors_back = defaultdict(lambda: defaultdict(int))
-		self.adjacent_bases = { 'A': 0, 'C': 0, 'G': 0, 'T': 0, '': 0 }
 
 		self.aligner = align.Aligner(self.sequence, self.max_error_rate,
 			flags=self.where, wildcard_ref=self.adapter_wildcards, wildcard_query=self.read_wildcards)
@@ -412,7 +411,7 @@ class Adapter(object):
 			self.aligner.indel_cost = 100000
 
 	def __repr__(self):
-		return '<Adapter(name="{name}", sequence="{sequence}", where={where}, '\
+		return '<Adapter(name={name!r}, sequence={sequence!r}, where={where}, '\
 			'max_error_rate={max_error_rate}, min_overlap={min_overlap}, '\
 			'read_wildcards={read_wildcards}, '\
 			'adapter_wildcards={adapter_wildcards}, '\
@@ -426,7 +425,7 @@ class Adapter(object):
 		self.debug = True
 		self.aligner.enable_debug()
 
-	def match_to(self, read):
+	def match_to(self, read, match_class=Match):
 		"""
 		Attempt to match this adapter to the given read.
 
@@ -445,7 +444,7 @@ class Adapter(object):
 			else:
 				pos = read_seq.find(self.sequence)
 		if pos >= 0:
-			match = Match(
+			match = match_class(
 				0, len(self.sequence), pos, pos + len(self.sequence),
 				len(self.sequence), 0, self._front_flag, self, read)
 		else:
@@ -459,7 +458,7 @@ class Adapter(object):
 						wildcard_ref=self.adapter_wildcards, wildcard_query=self.read_wildcards)
 				astart, astop, rstart, rstop, matches, errors = alignment
 				if astop - astart >= self.min_overlap and errors / (astop - astart) <= self.max_error_rate:
-					match = Match(*(alignment + (self._front_flag, self, read)))
+					match = match_class(*(alignment + (self._front_flag, self, read)))
 				else:
 					match = None
 			else:
@@ -470,7 +469,7 @@ class Adapter(object):
 					match = None
 				else:
 					astart, astop, rstart, rstop, matches, errors = alignment
-					match = Match(astart, astop, rstart, rstop, matches, errors, self._front_flag, self, read)
+					match = match_class(astart, astop, rstart, rstop, matches, errors, self._front_flag, self, read)
 
 		if match is None:
 			return None
@@ -483,7 +482,16 @@ class Adapter(object):
 
 
 class ColorspaceAdapter(Adapter):
+	"""
+	An Adapter, but in color space. It does not support all adapter types
+	(see the 'where' parameter).
+	"""
+
 	def __init__(self, *args, **kwargs):
+		"""
+		sequence -- the adapter sequence as a str, can be given in nucleotide space or in color space
+		where -- PREFIX, FRONT, BACK
+		"""
 		super(ColorspaceAdapter, self).__init__(*args, **kwargs)
 		has_nucleotide_seq = False
 		if set(self.sequence) <= set('ACGT'):
@@ -495,10 +503,17 @@ class ColorspaceAdapter(Adapter):
 			raise ValueError("A 5' colorspace adapter needs to be given in nucleotide space")
 		self.aligner.reference = self.sequence
 
-	def match_to(self, read):
-		"""Return Match instance"""
+	def __repr__(self):
+		return '<ColorspaceAdapter(sequence={0!r}, where={1})>'.format(self.sequence, self.where)
+
+	def match_to(self, read, match_class=ColorspaceMatch):
+		"""
+		Match the adapter to the given read
+
+		Return a ColorspaceMatch instance or None if the adapter was not found
+		"""
 		if self.where != PREFIX:
-			return super(ColorspaceAdapter, self).match_to(read)
+			return super(ColorspaceAdapter, self).match_to(read, match_class=match_class)
 		# create artificial adapter that includes a first color that encodes the
 		# transition from primer base into adapter
 		asequence = colorspace.ENCODE[read.primer + self.nucleotide_sequence[0:1]] + self.sequence
@@ -525,16 +540,10 @@ class ColorspaceAdapter(Adapter):
 		assert match.length >= self.min_overlap
 		return match
 
-	def __repr__(self):
-		return '<ColorspaceAdapter(sequence={0!r}, where={1})>'.format(self.sequence, self.where)
-
 
 class LinkedMatch(object):
 	"""
-	Represent a match of a LinkedAdapter.
-
-	TODO
-	It shouldn’t be necessary to have both a Match and a LinkedMatch class.
+	Represent a match of a LinkedAdapter
 	"""
 	def __init__(self, front_match, back_match, adapter):
 		self.front_match = front_match
@@ -542,6 +551,10 @@ class LinkedMatch(object):
 		self.adapter = adapter
 		assert not adapter.front_anchored or front_match is not None
 		assert not adapter.back_anchored or back_match is not None
+
+	def __repr__(self):
+		return '<LinkedMatch(front_match={0!r}, back_match={1}, adapter={2})>'.format(
+			self.front_match, self.back_match, self.adapter)
 
 	@property
 	def matches(self):
@@ -554,12 +567,12 @@ class LinkedMatch(object):
 		if self.front_match and self.back_match:
 			# TODO
 			# This does nothing except update the statistics
-			self.front_adapter.trimmed(self.front_match)
-			return self.back_adapter.trimmed(self.back_match)
+			self.front_match.trimmed()
+			return self.back_match.trimmed()
 		elif self.back_match:
-			return self.back_adapter.trimmed(self.back_match)
-		elif self.front_match :
-			return self.front_adapter.trimmed(self.front_match)
+			return self.back_match.trimmed()
+		elif self.front_match:
+			return self.front_match.trimmed()
 
 
 class LinkedAdapter(object):
@@ -595,33 +608,9 @@ class LinkedAdapter(object):
 			return None
 
 		if front_match is not None:
-			# TODO use match.trimmed() instead as soon as that does not update
-			# statistics anymore
-			read = read[front_match.rstop:]
+			# TODO statistics
+			read = front_match.trimmed()
 		back_match = self.back_adapter.match_to(read)
 		if back_match is None and (self.back_anchored or front_match is None):
 			return None
 		return LinkedMatch(front_match, back_match, self)
-
-	# Lots of forwarders (needed for the report). I’m sure this can be done
-	# in a better way.
-
-	@property
-	def lengths_front(self):
-		return self.front_adapter.lengths_front
-
-	@property
-	def lengths_back(self):
-		return self.back_adapter.lengths_back
-
-	@property
-	def errors_front(self):
-		return self.front_adapter.errors_front
-
-	@property
-	def errors_back(self):
-		return self.back_adapter.errors_back
-
-	@property
-	def adjacent_bases(self):
-		return self.back_adapter.adjacent_bases

@@ -193,17 +193,20 @@ class Match(object):
 	"""
 	TODO creating instances of this class is relatively slow and responsible for quite some runtime.
 	"""
-	__slots__ = ['astart', 'astop', 'rstart', 'rstop', 'matches', 'errors', 'front', 'adapter',
+	__slots__ = ['astart', 'astop', 'rstart', 'rstop', 'matches', 'errors', 'remove_before', 'adapter',
 		'read', 'length']
 
-	def __init__(self, astart, astop, rstart, rstop, matches, errors, front, adapter, read):
+	def __init__(self, astart, astop, rstart, rstop, matches, errors, remove_before, adapter, read):
+		"""
+		remove_before -- True: remove bases before adapter. False: remove after
+		"""
 		self.astart = astart
 		self.astop = astop
 		self.rstart = rstart
 		self.rstop = rstop
 		self.matches = matches
 		self.errors = errors
-		self.front = self._guess_is_front() if front is None else front
+		self.remove_before = remove_before
 		self.adapter = adapter
 		self.read = read
 		# Number of aligned characters in the adapter. If there are
@@ -217,15 +220,6 @@ class Match(object):
 	def __repr__(self):
 		return 'Match(astart={0}, astop={1}, rstart={2}, rstop={3}, matches={4}, errors={5})'.format(
 			self.astart, self.astop, self.rstart, self.rstop, self.matches, self.errors)
-
-	def _guess_is_front(self):
-		"""
-		Return whether this is guessed to be a front adapter.
-
-		The match is assumed to be a front adapter when the first base of
-		the read is involved in the alignment to the adapter.
-		"""
-		return self.rstart == 0
 
 	def wildcards(self, wildcard_char='N'):
 		"""
@@ -248,7 +242,7 @@ class Match(object):
 		return the part after the match if this is not a 'front' adapter (3').
 		This can be an empty string.
 		"""
-		if self.front:
+		if self.remove_before:
 			return self.read.sequence[:self.rstart]
 		else:
 			return self.read.sequence[self.rstop:]
@@ -278,16 +272,21 @@ class Match(object):
 		return info
 
 	def trimmed(self):
+		return self._trimmed_read
+
+	def trim(self):
 		if self.adapter.where in (BACK, SUFFIX):
-			return self._trimmed_back()
+			self._trimmed_read = self._trimmed_back()
 		elif self.adapter.where in (FRONT, PREFIX):
-			return self._trimmed_front()
-		else:
-			return self._trimmed_anywhere()
+			self._trimmed_read = self._trimmed_front()
+		elif self.remove_before:  # ANYWHERE adapter found in front
+			# must be ANYWHERE
+
+			self._trimmed_read = self._trimmed_anywhere()
 
 	def _trimmed_anywhere(self):
 		"""Return a trimmed read"""
-		if self.front:
+		if self.remove_before:
 			return self._trimmed_front()
 		else:
 			return self._trimmed_back()
@@ -396,10 +395,7 @@ class Adapter(object):
 		self.indels = indels
 		self.adapter_wildcards = adapter_wildcards and not set(self.sequence) <= set('ACGT')
 		self.read_wildcards = read_wildcards
-		if where == ANYWHERE:
-			self._front_flag = None  # means: guess
-		else:
-			self._front_flag = where not in (BACK, SUFFIX)
+		self.remove_before = where not in (BACK, SUFFIX)
 
 		self.aligner = align.Aligner(self.sequence, self.max_error_rate,
 			flags=self.where, wildcard_ref=self.adapter_wildcards, wildcard_query=self.read_wildcards)
@@ -433,7 +429,8 @@ class Adapter(object):
 		return None if no match was found given the matching criteria (minimum
 		overlap length, maximum error rate).
 		"""
-		read_seq = read.sequence.upper()
+		read_seq = read.sequence.upper()  # temporary copy
+		remove_before = self.remove_before
 		pos = -1
 		# try to find an exact match first unless wildcards are allowed
 		if not self.adapter_wildcards:
@@ -444,9 +441,12 @@ class Adapter(object):
 			else:
 				pos = read_seq.find(self.sequence)
 		if pos >= 0:
+			if self.where == ANYWHERE:
+				# guess: if alignment starts at pos 0, it’s a 5' adapter
+				remove_before = pos == 0
 			match = match_class(
 				0, len(self.sequence), pos, pos + len(self.sequence),
-				len(self.sequence), 0, self._front_flag, self, read)
+				len(self.sequence), 0, remove_before, self, read)
 		else:
 			# try approximate matching
 			if not self.indels and self.where in (PREFIX, SUFFIX):
@@ -458,7 +458,7 @@ class Adapter(object):
 						wildcard_ref=self.adapter_wildcards, wildcard_query=self.read_wildcards)
 				astart, astop, rstart, rstop, matches, errors = alignment
 				if astop - astart >= self.min_overlap and errors / (astop - astart) <= self.max_error_rate:
-					match = match_class(*(alignment + (self._front_flag, self, read)))
+					match = match_class(*(alignment + (remove_before, self, read)))
 				else:
 					match = None
 			else:
@@ -469,7 +469,10 @@ class Adapter(object):
 					match = None
 				else:
 					astart, astop, rstart, rstop, matches, errors = alignment
-					match = match_class(astart, astop, rstart, rstop, matches, errors, self._front_flag, self, read)
+					if self.where == ANYWHERE:
+						# guess: if alignment starts at pos 0, it’s a 5' adapter
+						remove_before = rstart == 0
+					match = match_class(astart, astop, rstart, rstop, matches, errors, remove_before, self, read)
 
 		if match is None:
 			return None
@@ -522,7 +525,7 @@ class ColorspaceAdapter(Adapter):
 		if pos >= 0:
 			match = ColorspaceMatch(
 				0, len(asequence), pos, pos + len(asequence),
-				len(asequence), 0, self._front_flag, self, read)
+				len(asequence), 0, self.remove_before, self, read)
 		else:
 			# try approximate matching
 			self.aligner.reference = asequence
@@ -530,7 +533,7 @@ class ColorspaceAdapter(Adapter):
 			if self.debug:
 				print(self.aligner.dpmatrix)  # pragma: no cover
 			if alignment is not None:
-				match = ColorspaceMatch(*(alignment + (self._front_flag, self, read)))
+				match = ColorspaceMatch(*(alignment + (self.remove_before, self, read)))
 			else:
 				match = None
 

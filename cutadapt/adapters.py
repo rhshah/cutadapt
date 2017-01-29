@@ -193,8 +193,8 @@ class Match(object):
 	"""
 	TODO creating instances of this class is relatively slow and responsible for quite some runtime.
 	"""
-	__slots__ = ['astart', 'astop', 'rstart', 'rstop', 'matches', 'errors', 'remove_before', 'adapter',
-		'read', 'length']
+	__slots__ = ['astart', 'astop', 'rstart', 'rstop', 'matches', 'errors', 'remove_before',
+		'adapter', 'read', 'length', '_trimmed_read', 'adjacent_base']
 
 	def __init__(self, astart, astop, rstart, rstop, matches, errors, remove_before, adapter, read):
 		"""
@@ -206,9 +206,13 @@ class Match(object):
 		self.rstop = rstop
 		self.matches = matches
 		self.errors = errors
-		self.remove_before = remove_before
 		self.adapter = adapter
 		self.read = read
+		if remove_before:
+			self._trim_front()
+		else:
+			self._trim_back()
+		self.remove_before = remove_before
 		# Number of aligned characters in the adapter. If there are
 		# indels, this may be different from the number of characters
 		# in the read.
@@ -230,9 +234,10 @@ class Match(object):
 		If there are indels, this is not reliable as the full alignment
 		is not available.
 		"""
+		# TODO still assumes bytes
 		wildcards = [ self.read.sequence[self.rstart + i:self.rstart + i + 1] for i in range(self.length)
 			if self.adapter.sequence[self.astart + i] == wildcard_char and
-			   self.rstart + i < len(self.read.sequence) ]
+				self.rstart + i < len(self.read.sequence) ]
 		return ''.join(wildcards)
 
 	def rest(self):
@@ -274,78 +279,43 @@ class Match(object):
 	def trimmed(self):
 		return self._trimmed_read
 
-	def trim(self):
-		if self.adapter.where in (BACK, SUFFIX):
-			self._trimmed_read = self._trimmed_back()
-		elif self.adapter.where in (FRONT, PREFIX):
-			self._trimmed_read = self._trimmed_front()
-		elif self.remove_before:  # ANYWHERE adapter found in front
-			# must be ANYWHERE
+	def _trim_front(self):
+		"""Compute the trimmed read, assuming it’s a 'front' adapter"""
+		self._trimmed_read = self.read[self.rstop:]
+		self.adjacent_base = ''
 
-			self._trimmed_read = self._trimmed_anywhere()
-
-	def _trimmed_anywhere(self):
-		"""Return a trimmed read"""
-		if self.remove_before:
-			return self._trimmed_front()
-		else:
-			return self._trimmed_back()
-
-	def _trimmed_front(self):
-		"""Return a trimmed read"""
-		# TODO move away/fix
-		#self.lengths_front[match.rstop] += 1
-		#self.errors_front[match.rstop][match.errors] += 1
-		#self.length_removed = ...
-		return self.read[self.rstop:]
-
-	def _trimmed_back(self):
-		"""Return a trimmed read without the 3' (back) adapter"""
-		# TODO move away/fix
-		#self.lengths_back[len(match.read) - match.rstart] += 1
-		#self.errors_back[len(match.read) - match.rstart][match.errors] += 1
-		#self.length_removed = ...
+	def _trim_back(self):
+		"""Compute the trimmed read, assuming it’s a 'back' adapter"""
 		adjacent_base = self.read.sequence[self.rstart-1:self.rstart]
 		if adjacent_base not in 'ACGT':
 			adjacent_base = ''
-		# TODO self.adjacent_bases[adjacent_base] += 1
-		# TODO self.adjacent_base = adjacent_base
-		return self.read[:self.rstart]
+		self.adjacent_base = adjacent_base
+		self._trimmed_read = self.read[:self.rstart]
 
 
 class ColorspaceMatch(Match):
 
-	def trimmed(self):
-		if self.adapter.where in (BACK, SUFFIX):
-			return self._trimmed_back()
-		elif self.adapter.where in (FRONT, PREFIX):
-			return self._trimmed_front()
-
-	def _trimmed_front(self):
+	def _trim_front(self):
 		"""Return a trimmed read"""
 		read = self.read
-		# TODO
-		# self.lengths_front[self.rstop] += 1
-		# self.errors_front[self.rstop][self.errors] += 1
 		# to remove a front adapter, we need to re-encode the first color following the adapter match
-		color_after_adapter = read.sequence[self.rstop:self.rstop + 1]
+		color_after_adapter = read.sequence[self.rstop:self.rstop + 1]  # TODO still assumes bytes
 		if not color_after_adapter:
 			# the read is empty
-			return read[self.rstop:]
-		base_after_adapter = colorspace.DECODE[self.adapter.nucleotide_sequence[-1:] + color_after_adapter]
-		new_first_color = colorspace.ENCODE[read.primer + base_after_adapter]
-		new_read = read[:]
-		new_read.sequence = new_first_color + read.sequence[(self.rstop + 1):]
-		new_read.qualities = read.qualities[self.rstop:] if read.qualities else None
-		return new_read
+			new_read = read[self.rstop:]
+		else:
+			base_after_adapter = colorspace.DECODE[self.adapter.nucleotide_sequence[-1:] + color_after_adapter]
+			new_first_color = colorspace.ENCODE[read.primer + base_after_adapter]
+			new_read = read[:]
+			new_read.sequence = new_first_color + read.sequence[(self.rstop + 1):]
+			new_read.qualities = read.qualities[self.rstop:] if read.qualities else None
+		self._trimmed_read =  new_read
 
-	def _trimmed_back(self):
+	def _trim_back(self):
 		"""Return a trimmed read"""
 		# trim one more color if long enough
 		adjusted_rstart = max(self.rstart - 1, 0)
-		# TODO self.lengths_back[len(self.read) - adjusted_rstart] += 1
-		# TODO self.errors_back[len(self.read) - adjusted_rstart][self.errors] += 1
-		return self.read[:adjusted_rstart]
+		self._trimmed_read = self.read[:adjusted_rstart]
 
 
 def _generate_adapter_name(_start=[1]):

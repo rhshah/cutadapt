@@ -12,6 +12,16 @@ from cutadapt.qualtrim import quality_trim_index, nextseq_trim_index
 from cutadapt.compat import maketrans
 
 
+class AdapterStatistics(object):
+	def __init__(self, adapter):
+		self.adapter = adapter
+		self.lengths_front = defaultdict(int)
+		self.lengths_back = defaultdict(int)
+		self.errors_front = defaultdict(lambda: defaultdict(int))
+		self.errors_back = defaultdict(lambda: defaultdict(int))
+		self.adjacent_bases = {'A': 0, 'C': 0, 'G': 0, 'T': 0, '': 0}
+
+
 class AdapterCutter(object):
 	"""
 	Repeatedly find one of multiple adapters in reads.
@@ -34,15 +44,6 @@ class AdapterCutter(object):
 		self.action = action
 		self.with_adapters = 0
 		self.keep_match_info = self.info_file is not None
-
-		class AdapterStatistics(object):
-			def __init__(self, adapter):
-				self.adapter = adapter
-				self.lengths_front = defaultdict(int)
-				self.lengths_back = defaultdict(int)
-				self.errors_front = defaultdict(lambda: defaultdict(int))
-				self.errors_back = defaultdict(lambda: defaultdict(int))
-				self.adjacent_bases = {'A': 0, 'C': 0, 'G': 0, 'T': 0, '': 0}
 
 		self.adapter_statistics = {a: AdapterStatistics(a) for a in adapters}
 
@@ -109,12 +110,18 @@ class AdapterCutter(object):
 				# nothing found
 				break
 			matches.append(match)
+			previous_length = len(trimmed_read)
 			trimmed_read = match.trimmed()
+
 
 			# Update statistics
 			stats = self.adapter_statistics[match.adapter]
+			stats.errors_front[match.bases_trimmed][match.errors] += 1
 
-			WORKING_HERE
+		#self.lengths_front[match.rstop] += 1
+		#self.errors_front[match.rstop][match.errors] += 1
+		#self.length_removed = ...
+
 		# 	self.lengths_front = {a: defaultdict(int) for a in adapters}
 		# self.lengths_back = {a: defaultdict(int) for a in adapters}
 		# self.errors_front = {a: defaultdict(lambda: defaultdict(int)) for a in adapters}

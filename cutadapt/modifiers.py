@@ -15,11 +15,19 @@ from cutadapt.compat import maketrans
 class AdapterStatistics(object):
 	def __init__(self, adapter):
 		self.adapter = adapter
-		self.lengths_front = defaultdict(int)
-		self.lengths_back = defaultdict(int)
 		self.errors_front = defaultdict(lambda: defaultdict(int))
 		self.errors_back = defaultdict(lambda: defaultdict(int))
 		self.adjacent_bases = {'A': 0, 'C': 0, 'G': 0, 'T': 0, '': 0}
+
+	@property
+	def lengths_front(self):
+		d = {length: sum(errors.values()) for length, errors in self.errors_front.items()}
+		return d
+
+	@property
+	def lengths_back(self):
+		d = {length: sum(errors.values()) for length, errors in self.errors_back.items()}
+		return d
 
 
 class AdapterCutter(object):
@@ -43,8 +51,7 @@ class AdapterCutter(object):
 		self.rest_writer = rest_writer
 		self.action = action
 		self.with_adapters = 0
-		self.keep_match_info = self.info_file is not None
-
+		self.keep_match_info = self.info_file is not None  # TODO what is this needed for?
 		self.adapter_statistics = {a: AdapterStatistics(a) for a in adapters}
 
 	def _best_match(self, read):
@@ -53,6 +60,9 @@ class AdapterCutter(object):
 
 		Return either a Match instance or None if there are no matches.
 		"""
+		# TODO
+		# try to sort adapters by length, longest first, break when current best
+		# match is longer than length of next adapter to try
 		best = None
 		for adapter in self.adapters:
 			match = adapter.match_to(read)
@@ -79,7 +89,7 @@ class AdapterCutter(object):
 			print(match.wildcards(), read.name, file=self.wildcard_file)
 
 		if self.info_file:
-			if read.match_info:
+			if read.match_info:  # TODO pass this in as a parameter, not as an attribute of read
 				for m in read.match_info:
 					print(*m, sep='\t', file=self.info_file)
 			else:
@@ -113,25 +123,15 @@ class AdapterCutter(object):
 			previous_length = len(trimmed_read)
 			trimmed_read = match.trimmed()
 
-
 			# Update statistics
+			removed_bases = previous_length - len(trimmed_read)
 			stats = self.adapter_statistics[match.adapter]
-			stats.errors_front[match.bases_trimmed][match.errors] += 1
+			stats.adjacent_bases[match.adjacent_base] += 1
+			if match.remove_before:
+				stats.errors_front[removed_bases][match.errors] += 1
+			else:
+				stats.errors_back[removed_bases][match.errors] += 1
 
-		#self.lengths_front[match.rstop] += 1
-		#self.errors_front[match.rstop][match.errors] += 1
-		#self.length_removed = ...
-
-		# 	self.lengths_front = {a: defaultdict(int) for a in adapters}
-		# self.lengths_back = {a: defaultdict(int) for a in adapters}
-		# self.errors_front = {a: defaultdict(lambda: defaultdict(int)) for a in adapters}
-		# self.errors_back = {a: defaultdict(lambda: defaultdict(int)) for a in adapters}
-		# adjacent_bases = {'A': 0, 'C': 0, 'G': 0, 'T': 0, '': 0}
-		# self.adjacent_bases
-
-
-			# TODO obtain stats here
-		
 		if not matches:
 			trimmed_read.match = None
 			trimmed_read.match_info = None
@@ -151,7 +151,7 @@ class AdapterCutter(object):
 				ns = 'N' * (len(match.read.sequence) -
 							len(match.trimmed().sequence))  # TODO is this correct? -> stats?
 				# add N depending on match position
-				if match.front:
+				if match.remove_before:
 					masked_sequence = ns + masked_sequence
 				else:
 					masked_sequence += ns

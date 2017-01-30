@@ -294,6 +294,7 @@ class Match(object):
 
 
 class ColorspaceMatch(Match):
+	adjacent_base = ''
 
 	def _trim_front(self):
 		"""Return a trimmed read"""
@@ -546,6 +547,10 @@ class LinkedMatch(object):
 			return self.back_match.trimmed()
 		elif self.front_match:
 			return self.front_match.trimmed()
+
+	@property
+	def adjacent_base(self):
+		return self.back_match.adjacent_base
 
 
 class LinkedAdapter(object):
